@@ -1874,7 +1874,14 @@ else:
                 self.watermark = None
 
         def upcast_vae(self):
-            super().upcast_vae()
+            # Upcast the VAE to float32 to prevent overflow
+            self.vae.to(dtype=torch.float32)
+            # If mid_block exists, apply the scaling to the attention weights
+            if hasattr(self.vae.decoder, 'mid_block') and hasattr(self.vae.decoder.mid_block, 'attentions'):
+                self.vae.decoder.mid_block.attentions[0].to_q.weight.data *= self.vae.config.scaling_factor
+                self.vae.decoder.mid_block.attentions[0].to_k.weight.data *= self.vae.config.scaling_factor
+                self.vae.decoder.mid_block.attentions[0].to_v.weight.data *= self.vae.config.scaling_factor
+                self.vae.decoder.mid_block.attentions[0].to_out[0].weight.data /= self.vae.config.scaling_factor
             self.vae_upcasted = True
 
         @torch.no_grad()
@@ -2253,39 +2260,13 @@ else:
                 if self.needs_upcasting:
                     if not self.vae_upcasted:
                         self.upcast_vae()
-                    dtype = next(iter(self.vae.post_quant_conv.parameters())).dtype
+                    # Safely get the dtype from the VAE parameters
+                    dtype = next(self.vae.parameters()).dtype
                     latents = latents.to(dtype)
 
-                # unscale/denormalize the latents
-                # denormalize with the mean and std if available and not None
-                has_latents_mean = (
-                    hasattr(self.vae.config, "latents_mean")
-                    and self.vae.config.latents_mean is not None
-                )
-                has_latents_std = (
-                    hasattr(self.vae.config, "latents_std")
-                    and self.vae.config.latents_std is not None
-                )
-                if has_latents_mean and has_latents_std:
-                    latents_mean = (
-                        torch.tensor(self.vae.config.latents_mean)
-                        .view(1, 4, 1, 1)
-                        .to(latents.device, latents.dtype)
-                    )
-                    latents_std = (
-                        torch.tensor(self.vae.config.latents_std)
-                        .view(1, 4, 1, 1)
-                        .to(latents.device, latents.dtype)
-                    )
-                    latents = (
-                        latents * latents_std / self.vae.config.scaling_factor
-                        + latents_mean
-                    )
-                else:
-                    latents = latents / self.vae.config.scaling_factor
-
-                image = self.vae.decode(latents, return_dict=False)[0]
-
+                image = self.vae.decode(
+                    latents / self.vae.config.scaling_factor, return_dict=False
+                )[0]
             else:
                 image = latents
 
